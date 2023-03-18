@@ -1,11 +1,12 @@
 import json
-import requests
 import time
 from functools import wraps
+import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from collections import deque
 
-# URL to scrape
-url = "https://www.eenadu.net"
+BASE_URL = "https://www.eenadu.net"
 
 
 def retry_on_exception(max_retries=3, backoff_factor=1):
@@ -26,68 +27,87 @@ def retry_on_exception(max_retries=3, backoff_factor=1):
     return decorator
 
 
-@retry_on_exception()
+def save_article(article, output_file):
+    with open(output_file, 'a') as f:
+        json.dump(article, f, ensure_ascii=False)
+        f.write('\n')
+
+
+@retry_on_exception(max_retries=3, backoff_factor=1)
 def extract_content(url, session):
     response = session.get(url)
     response.raise_for_status()
     soup = BeautifulSoup(response.content, 'html.parser')
-    fullstory_div = soup.find('div', {'class': 'fullstory'})
-    text = ''
-    heading = ''
-    date_published = ''
+    fullstory_div = soup.find('div', {'class': 'fullstory'}) or soup.find('section', {'class': 'fullstory'})
+
     if fullstory_div:
-        heading = fullstory_div.find('h1')
-        if heading:
-            heading = heading.get_text()
-        date_published_div = fullstory_div.find('div', {'class': 'eng-body grey pub-t'})
-        if date_published_div:
-            date_published = date_published_div.get_text().strip()
-        text_div = fullstory_div.find('div', {'class': 'text-justify'})
-        if text_div:
-            paragraphs = text_div.find_all('p')
-            for p in paragraphs:
-                text += p.get_text() + '\n\n'
+        text = extract_text(fullstory_div)
+        heading = extract_heading(fullstory_div)
+        date_published = extract_date_published(fullstory_div)
+    else:
+        text = ''
+        heading = ''
+        date_published = ''
+
     return {'url': url, 'title': heading, 'date_published': date_published, 'content': text}, soup
 
 
-def extract_urls(soup):
+def extract_text(soup):
+    text = ''
+    paragraphs = soup.find_all('p')
+    for p in paragraphs:
+        text += p.get_text() + '\n\n'
+    return text
+
+
+def extract_heading(soup):
+    heading = ''
+    heading_tag = soup.find('h1')
+    if heading_tag:
+        heading = heading_tag.get_text()
+    return heading
+
+
+def extract_date_published(soup):
+    date_published = ''
+    date_published_div = soup.find('div', {'class': 'pub-t'})
+    if date_published_div:
+        date_published = date_published_div.get_text().strip()
+    return date_published
+
+
+def extract_urls(soup, base_url):
     anchors = soup.find_all('a')
-    return {a.get('href') for a in anchors if a.get('href') and a.get('href').startswith("https://www.eenadu.net/")}
+    return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith("/")}
 
 
-articles = []
+def main():
+    with requests.Session() as session:
+        visited = set()
+        queue = deque([BASE_URL])
 
-with requests.Session() as session:
-    visited = set()
+        with open('eenadu.json', 'w') as output_file:
+            output_file.write('[')
 
-    # Extract main content
-    article, main_soup = extract_content(url, session)
-    articles.append(article)
-    visited.add(url)
+        while queue:
+            current_url = queue.popleft()
+            if current_url not in visited:
+                visited.add(current_url)
+                try:
+                    article, soup = extract_content(current_url, session)
 
-    # Extract URLs
-    urls = extract_urls(main_soup)
+                    save_article(article, 'eenadu.json')
 
-    # Loop through each URL and extract the text content from the specified elements
-    for url in urls - visited:
-        visited.add(url)
-        try:
-            article, soup = extract_content(url, session)
-            articles.append(article)
+                    urls = extract_urls(soup, BASE_URL)
+                    queue.extend(url for url in urls if url not in visited)
 
-            # Find all the anchor tags on the page and extract the URLs
-            link_urls = extract_urls(soup)
+                except requests.exceptions.RequestException as e:
+                    print(f"Error while requesting {current_url}: {e}")
+                    continue
 
-            # Loop through each link URL and extract the text content
-            for link_url in link_urls - visited:
-                visited.add(link_url)
-                link_article, _ = extract_content(link_url, session)
-                articles.append(link_article)
+        with open('eenadu.json', 'a') as output_file:
+            output_file.write(']')
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error while requesting {url}: {e}")
-            continue
 
-# Save the articles to a JSON file
-with open('eenadu.json', 'w') as output_file:
-    json.dump(articles, output_file, ensure_ascii=False, indent=2)
+if __name__ == "__main__":
+    main()
