@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/eenadu-khammam-scraper.iml" filepath="$PROJECT_DIR$/eenadu-khammam-scraper.iml" />
+      <module fileurl="file://$PROJECT_DIR$/eenadu-text-extract.iml" filepath="$PROJECT_DIR$/eenadu-text-extract.iml" />
     </modules>
   </component>
 </project>

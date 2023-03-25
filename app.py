@@ -78,7 +78,7 @@ def extract_date_published(soup):
 
 def extract_urls(soup, base_url):
     anchors = soup.find_all('a')
-    return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith("/")}
+    return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith(BASE_URL)}
 
 
 def main():
