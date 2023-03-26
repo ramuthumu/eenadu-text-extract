@@ -1,5 +1,4 @@
 import json
-import signal
 import time
 from functools import wraps
 import requests
@@ -9,17 +8,6 @@ from urllib.parse import urljoin
 from collections import deque
 
 BASE_URL = "https://www.eenadu.net"
-
-
-# Define a function that will be called when the alarm goes off
-def alarm_handler(signum, frame):
-    raise TimeoutError("Timeout reached")
-
-# Set the alarm handler to the alarm_handler function
-signal.signal(signal.SIGINT, alarm_handler)
-
-# Set the alarm to go off after 30 seconds
-signal.alarm(60)
 
 def retry_on_exception(max_retries=3, backoff_factor=1):
     def decorator(func):
