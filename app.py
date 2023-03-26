@@ -1,10 +1,10 @@
 import json
-import time
 from functools import wraps
-import requests
+from collections import deque
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from collections import deque
 
 BASE_URL = "https://www.eenadu.net"
 
@@ -12,15 +12,15 @@ BASE_URL = "https://www.eenadu.net"
 def retry_on_exception(max_retries=3, backoff_factor=1):
     def decorator(func):
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             for i in range(max_retries + 1):
                 try:
-                    return func(*args, **kwargs)
+                    return await func(*args, **kwargs)
                 except Exception as e:
                     if i == max_retries:
                         raise e
                     sleep_time = backoff_factor * (2 ** i)
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
 
         return wrapper
 
@@ -34,22 +34,23 @@ def save_article(article, output_file):
 
 
 @retry_on_exception(max_retries=3, backoff_factor=1)
-def extract_content(url, session):
-    response = session.get(url)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.content, 'html.parser')
-    fullstory_div = soup.find('div', {'class': 'fullstory'}) or soup.find('section', {'class': 'fullstory'})
+async def extract_content(url, session):
+    async with session.get(url) as response:
+        response.raise_for_status()
+        content = await response.text()
+        soup = BeautifulSoup(content, 'html.parser')
+        fullstory_div = soup.find('div', {'class': 'fullstory'}) or soup.find('section', {'class': 'fullstory'})
 
-    if fullstory_div:
-        text = extract_text(fullstory_div)
-        heading = extract_heading(fullstory_div)
-        date_published = extract_date_published(fullstory_div)
-    else:
-        text = ''
-        heading = ''
-        date_published = ''
+        if fullstory_div:
+            text = extract_text(fullstory_div)
+            heading = extract_heading(fullstory_div)
+            date_published = extract_date_published(fullstory_div)
+        else:
+            text = ''
+            heading = ''
+            date_published = ''
 
-    return {'url': url, 'title': heading, 'date_published': date_published, 'content': text}, soup
+        return {'url': url, 'title': heading, 'date_published': date_published, 'content': text}, soup
 
 
 def extract_text(soup):
@@ -81,33 +82,34 @@ def extract_urls(soup, base_url):
     return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith(BASE_URL)}
 
 
-def main():
-    with requests.Session() as session:
-        visited = set()
-        queue = deque([BASE_URL])
-
-        with open('eenadu.json', 'w') as output_file:
-            output_file.write('[')
-
+async def fetch_urls_in_queue(queue, visited, output_file_name, max_concurrent_requests=10):
+    async with aiohttp.ClientSession() as session:
         while queue:
-            current_url = queue.popleft()
-            if current_url not in visited:
-                visited.add(current_url)
-                try:
-                    article, soup = extract_content(current_url, session)
+            tasks = []
+            for i in range(min(len(queue), max_concurrent_requests)):
+                current_url = queue.popleft()
+                if current_url not in visited:
+                    visited.add(current_url)
+                    tasks.append(asyncio.ensure_future(extract_content(current_url, session)))
 
-                    save_article(article, 'eenadu.json')
-
-                    urls = extract_urls(soup, BASE_URL)
+            articles = await asyncio.gather(*tasks, return_exceptions=True)
+            for article in articles:
+                if isinstance(article, tuple):  # Check if the result is a tuple (successful fetch)
+                    write_article_to_file(article[0], output_file_name)
+                    urls = extract_urls(article[1], BASE_URL)
                     queue.extend(url for url in urls if url not in visited)
 
-                except requests.exceptions.RequestException as e:
-                    print(f"Error while requesting {current_url}: {e}")
-                    continue
 
-        with open('eenadu.json', 'a') as output_file:
-            output_file.write(']')
+def write_article_to_file(article, output_file_name):
+    with open(output_file_name, 'a') as output_file:
+        json.dump(article, output_file, ensure_ascii=False)
+        output_file.write('\n') # Write each article on a new line
 
+async def main():
+    visited = set()
+    queue = deque([BASE_URL])
+    output_file_name = 'eenadu.json'
+    await fetch_urls_in_queue(queue, visited, output_file_name)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
