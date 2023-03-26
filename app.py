@@ -104,19 +104,25 @@ def main():
             output_file.write('[')
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            while queue:
-                current_url = queue.popleft()
-                if current_url not in visited:
-                    visited.add(current_url)
+            future_to_url = {}
 
-                    future_to_url = {executor.submit(process_url, url, session): url for url in visited}
-                    for future in concurrent.futures.as_completed(future_to_url):
-                        url = future_to_url[future]
-                        try:
-                            new_urls = future.result()
-                            queue.extend(url for url in new_urls if url not in visited)
-                        except Exception as exc:
-                            print(f"{url} generated an exception: {exc}")
+            while queue or future_to_url:
+                if queue:
+                    current_url = queue.popleft()
+                    if current_url not in visited:
+                        visited.add(current_url)
+                        future = executor.submit(process_url, current_url, session)
+                        future_to_url[future] = current_url
+
+                for future in concurrent.futures.as_completed(list(future_to_url.keys())):
+                    url = future_to_url[future]
+                    try:
+                        new_urls = future.result()
+                        queue.extend(url for url in new_urls if url not in visited)
+                    except Exception as exc:
+                        print(f"{url} generated an exception: {exc}")
+                    finally:
+                        del future_to_url[future]
 
         with open('eenadu.json', 'a') as output_file:
             output_file.write(']')
