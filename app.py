@@ -3,11 +3,11 @@ import time
 from functools import wraps
 import requests
 from bs4 import BeautifulSoup
+import concurrent.futures
 from urllib.parse import urljoin
 from collections import deque
 
 BASE_URL = "https://www.eenadu.net"
-
 
 def retry_on_exception(max_retries=3, backoff_factor=1):
     def decorator(func):
@@ -81,6 +81,20 @@ def extract_urls(soup, base_url):
     return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith(BASE_URL)}
 
 
+def process_url(current_url, session):
+    try:
+        article, soup = extract_content(current_url, session)
+
+        save_article(article, 'eenadu.json')
+
+        urls = extract_urls(soup, BASE_URL)
+        return urls
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error while requesting {current_url}: {e}")
+        return set()
+
+
 def main():
     with requests.Session() as session:
         visited = set()
@@ -89,21 +103,26 @@ def main():
         with open('eenadu.json', 'w') as output_file:
             output_file.write('[')
 
-        while queue:
-            current_url = queue.popleft()
-            if current_url not in visited:
-                visited.add(current_url)
-                try:
-                    article, soup = extract_content(current_url, session)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_url = {}
 
-                    save_article(article, 'eenadu.json')
+            while queue or future_to_url:
+                if queue:
+                    current_url = queue.popleft()
+                    if current_url not in visited:
+                        visited.add(current_url)
+                        future = executor.submit(process_url, current_url, session)
+                        future_to_url[future] = current_url
 
-                    urls = extract_urls(soup, BASE_URL)
-                    queue.extend(url for url in urls if url not in visited)
-
-                except requests.exceptions.RequestException as e:
-                    print(f"Error while requesting {current_url}: {e}")
-                    continue
+                for future in concurrent.futures.as_completed(list(future_to_url.keys())):
+                    url = future_to_url[future]
+                    try:
+                        new_urls = future.result()
+                        queue.extend(url for url in new_urls if url not in visited)
+                    except Exception as exc:
+                        print(f"{url} generated an exception: {exc}")
+                    finally:
+                        del future_to_url[future]
 
         with open('eenadu.json', 'a') as output_file:
             output_file.write(']')
