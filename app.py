@@ -1,30 +1,44 @@
 import json
-import time
-from functools import wraps
 import requests
 from bs4 import BeautifulSoup
 import concurrent.futures
 from urllib.parse import urljoin
-from collections import deque
+import sqlite3
 
 BASE_URL = "https://www.eenadu.net"
 
-def retry_on_exception(max_retries=3, backoff_factor=1):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for i in range(max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if i == max_retries:
-                        raise e
-                    sleep_time = backoff_factor * (2 ** i)
-                    time.sleep(sleep_time)
+URLS_DB_NAME = "urls.db"
+ARTICLE_DB_NAME = "articles.db"
 
-        return wrapper
+BATCH_SIZE = 100  # Number of URLs to process in a batch
 
-    return decorator
+
+def get_next_urls(batch_size):
+    with sqlite3.connect(URLS_DB_NAME) as conn:
+        return [row[0] for row in conn.execute("""
+        SELECT url FROM urls WHERE visited = FALSE LIMIT ?
+        """, (batch_size,))]
+
+
+def mark_urls_as_visited(urls):
+    with sqlite3.connect(URLS_DB_NAME) as conn:
+        conn.executemany("""
+        UPDATE urls SET visited = TRUE WHERE url = ?
+        """, [(url,) for url in urls])
+
+
+def mark_urls_as_scraped(urls):
+    with sqlite3.connect(URLS_DB_NAME) as conn:
+        conn.executemany("""
+        UPDATE urls SET scraped = TRUE WHERE url = ?
+        """, [(url,) for url in urls])
+
+
+def insert_new_urls(urls):
+    with sqlite3.connect(URLS_DB_NAME) as conn:
+        conn.executemany("""
+        INSERT OR IGNORE INTO urls (url, visited, scraped) VALUES (?, FALSE, FALSE)
+        """, [(url,) for url in urls])
 
 
 def save_article(article, output_file):
@@ -33,7 +47,6 @@ def save_article(article, output_file):
         f.write('\n')
 
 
-@retry_on_exception(max_retries=3, backoff_factor=1)
 def extract_content(url, session):
     response = session.get(url)
     response.raise_for_status()
@@ -78,14 +91,22 @@ def extract_date_published(soup):
 
 def extract_urls(soup, base_url):
     anchors = soup.find_all('a')
-    return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith(BASE_URL)}
+    return {urljoin(base_url, a.get('href')) for a in anchors if a.get('href') and a.get('href').startswith(base_url)}
+
+
+def insert_article(article):
+    with sqlite3.connect(ARTICLE_DB_NAME) as conn:
+        conn.execute("""
+        INSERT INTO articles (url, title, date_published, content) VALUES (?, ?, ?, ?)
+        """, (article['url'], article['title'], article['date_published'], article['content']))
 
 
 def process_url(current_url, session):
     try:
         article, soup = extract_content(current_url, session)
 
-        save_article(article, 'eenadu.json')
+        # Save the article directly to the database instead of a JSON file
+        insert_article(article)
 
         urls = extract_urls(soup, BASE_URL)
         return urls
@@ -96,36 +117,30 @@ def process_url(current_url, session):
 
 
 def main():
-    with requests.Session() as session:
-        visited = set()
-        queue = deque([BASE_URL])
 
-        with open('eenadu.json', 'w') as output_file:
-            output_file.write('[')
+    with requests.Session() as session:
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_url = {}
+            while True:
+                current_urls = get_next_urls(BATCH_SIZE)
+                if not current_urls:
+                    break
 
-            while queue or future_to_url:
-                if queue:
-                    current_url = queue.popleft()
-                    if current_url not in visited:
-                        visited.add(current_url)
-                        future = executor.submit(process_url, current_url, session)
-                        future_to_url[future] = current_url
+                mark_urls_as_visited(current_urls)
 
-                for future in concurrent.futures.as_completed(list(future_to_url.keys())):
+                future_to_url = {
+                    executor.submit(process_url, url, session): url for url in current_urls
+                }
+
+                for future in concurrent.futures.as_completed(future_to_url):
                     url = future_to_url[future]
                     try:
                         new_urls = future.result()
-                        queue.extend(url for url in new_urls if url not in visited)
+                        insert_new_urls(new_urls)
                     except Exception as exc:
                         print(f"{url} generated an exception: {exc}")
-                    finally:
-                        del future_to_url[future]
 
-        with open('eenadu.json', 'a') as output_file:
-            output_file.write(']')
+                mark_urls_as_scraped(current_urls)
 
 
 if __name__ == "__main__":
